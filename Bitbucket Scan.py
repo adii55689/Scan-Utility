@@ -6,6 +6,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import tempfile
 import urllib.parse
+import git
+from git.remote import RemoteProgress
 
 # ---------------- Dependency Installer ---------------- #
 def ensure_dependency(package, version=None):
@@ -25,8 +27,7 @@ def ensure_dependency(package, version=None):
 
 ensure_dependency("gitpython")
 ensure_dependency("openpyxl")
-import git
-from git.remote import RemoteProgress
+import openpyxl
 
 # ---------------- Export Functions ---------------- #
 def export_csv(results, output_file="search_results.csv"):
@@ -44,7 +45,6 @@ def export_excel(results, output_file="search_results.xlsx"):
     if not results:
         messagebox.showwarning("No Results", "No results found to export.")
         return
-    import openpyxl
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Search Results"
@@ -82,7 +82,8 @@ def search_in_files(base_path, keyword, extensions, tree, progress_bar, count_va
             with open(file, "r", encoding="utf-8", errors="ignore") as f:
                 for i, line in enumerate(f, start=1):
                     line_text = line.strip()
-                    if keyword in line_text.split():  # exact match
+                    # Case-insensitive exact match
+                    if any(word.lower() == keyword.lower() for word in line_text.split()):
                         match_count += 1
                         results.append((file, i, line_text))
                         tree.insert("", "end", values=(len(results), file, i, line_text), tags=("highlight",))
@@ -94,19 +95,19 @@ def search_in_files(base_path, keyword, extensions, tree, progress_bar, count_va
     count_var.set(f"Found Keywords: {match_count}")
     return results
 
-# ---------------- UI Logic ---------------- #
+# ---------------- Run Search ---------------- #
 def run_search():
     repo_url = repo_url_entry.get().strip()
     username = username_entry.get().strip()
     token = token_entry.get().strip()
     keyword = keyword_entry.get().strip()
-    exts_choice = extension_var.get()
+    exts_choice = extension_var.get().strip()
 
     if not repo_url or not username or not token or not keyword:
         messagebox.showwarning("Input Error", "Please provide all required fields.")
         return
 
-    extensions = ["*"] if exts_choice == "All" else [e.strip() for e in exts_choice.split(",")]
+    extensions = ["*"] if exts_choice.lower() == "all" else [e.strip() for e in exts_choice.split(",")]
 
     for item in results_tree.get_children():
         results_tree.delete(item)
@@ -116,13 +117,14 @@ def run_search():
 
     temp_dir = tempfile.mkdtemp()
     try:
-        # Construct authenticated URL
         token_encoded = urllib.parse.quote(token)
         url_parts = repo_url.replace("https://", "").split("/", 1)
         repo_url_auth = f"https://{username}:{token_encoded}@{url_parts[0]}/{url_parts[1]}"
-        status_label.config(text=f"Cloning repository...", foreground="blue")
+
+        status_label.config(text="Cloning repository...", foreground="blue")
+        root.update_idletasks()
         git.Repo.clone_from(repo_url_auth, temp_dir, progress=CloneProgress(progress_bar, status_label))
-        status_label.config(text=f"Repository cloned successfully", foreground="green")
+        status_label.config(text="Repository cloned successfully", foreground="green")
 
         results.extend(search_in_files(temp_dir, keyword, extensions, results_tree, progress_bar, count_var))
 
@@ -131,7 +133,7 @@ def run_search():
             shutil.rmtree(temp_dir)
 
     except Exception as e:
-        status_label.config(text=f"Failed to clone repository", foreground="red")
+        status_label.config(text="Failed to clone repository", foreground="red")
         messagebox.showerror("Clone Error", f"Failed to clone repository: {e}")
         return
 
@@ -155,7 +157,7 @@ root.geometry("1400x900")
 padx_val = 10
 pady_val = 5
 
-# Repository URL
+# Repo URL
 tk.Label(root, text="Bitbucket Repository HTTPS URL:").grid(row=0, column=0, sticky="e", padx=padx_val, pady=pady_val)
 repo_url_entry = tk.Entry(root, width=60)
 repo_url_entry.grid(row=0, column=1, sticky="w", padx=padx_val, pady=pady_val)
@@ -175,7 +177,7 @@ tk.Label(root, text="Keyword to Search:").grid(row=3, column=0, sticky="e", padx
 keyword_entry = tk.Entry(root, width=60)
 keyword_entry.grid(row=3, column=1, sticky="w", padx=padx_val, pady=pady_val)
 
-# Extension
+# File Extensions
 tk.Label(root, text="File Extensions (comma separated or All):").grid(row=4, column=0, sticky="e", padx=padx_val, pady=pady_val)
 extension_var = tk.StringVar(value="All")
 extension_entry = tk.Entry(root, textvariable=extension_var, width=60)
@@ -186,17 +188,21 @@ tk.Button(root, text="Run Search", command=run_search, bg="lightblue", width=15)
 tk.Button(root, text="Export CSV", command=lambda: export_results("csv"), bg="lightgreen", width=15).grid(row=5, column=1, padx=padx_val, pady=pady_val)
 tk.Button(root, text="Export Excel", command=lambda: export_results("excel"), bg="lightgreen", width=15).grid(row=5, column=2, padx=padx_val, pady=pady_val)
 
+# Status Label
+status_label = tk.Label(root, text="Repository Status: Not started", foreground="black")
+status_label.grid(row=6, column=0, columnspan=3, sticky="w", padx=padx_val, pady=pady_val)
+
 # Keyword count
 count_var = tk.StringVar(value="Found Keywords: 0")
-tk.Label(root, textvariable=count_var, font=("Arial", 10, "bold")).grid(row=6, column=0, columnspan=3, sticky="w", padx=padx_val, pady=pady_val)
+tk.Label(root, textvariable=count_var, font=("Arial", 10, "bold")).grid(row=7, column=0, columnspan=3, sticky="w", padx=padx_val, pady=pady_val)
 
 # Progress Bar
 progress_bar = ttk.Progressbar(root, orient="horizontal", length=800, mode="determinate")
-progress_bar.grid(row=7, column=0, columnspan=3, padx=padx_val, pady=pady_val)
+progress_bar.grid(row=8, column=0, columnspan=3, padx=padx_val, pady=pady_val)
 
-# Results Treeview with scrollbars
+# Results Treeview
 results_frame = tk.Frame(root)
-results_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", padx=padx_val, pady=pady_val)
+results_frame.grid(row=9, column=0, columnspan=3, sticky="nsew", padx=padx_val, pady=pady_val)
 
 columns = ("#", "File Path", "Line Number", "Line Content")
 results_tree = ttk.Treeview(results_frame, columns=columns, show="headings")
@@ -215,7 +221,6 @@ hsb.grid(row=1, column=0, sticky="ew")
 results_frame.grid_rowconfigure(0, weight=1)
 results_frame.grid_columnconfigure(0, weight=1)
 
-# Bold keyword tag (applied only to keyword in line content)
 results_tree.tag_configure("highlight", font=("Arial", 10, "bold"))
 
 root.mainloop()
