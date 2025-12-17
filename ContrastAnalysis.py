@@ -2,7 +2,6 @@ import requests
 import argparse
 from datetime import datetime
 from pathlib import Path
-import sys
 
 # =====================================================
 # CONFIGURATION
@@ -45,7 +44,7 @@ def load_trace_ids(traces, file):
     return list(ids)
 
 # =====================================================
-# FETCH TRACE (UI ENDPOINT)
+# FETCH TRACE (UI-BACKED ENDPOINT)
 # =====================================================
 def fetch_trace(trace_id):
     url = (
@@ -57,24 +56,9 @@ def fetch_trace(trace_id):
     return r.json()
 
 # =====================================================
-# REPORTED STATUS NORMALIZATION
-# =====================================================
-def is_reported(trace):
-    status = (trace.get("status") or "").upper()
-    visible = trace.get("visible", False)
-
-    return (
-        visible
-        and status not in {"FIXED", "CLOSED", "FALSE_POSITIVE"}
-    )
-
-# =====================================================
-# PARSE TRACE
+# PARSE TRACE (NO STATUS FILTERING)
 # =====================================================
 def parse_trace(trace, fallback_id):
-    if not is_reported(trace):
-        return None
-
     analysis_id = f"ANL-{fallback_id.replace('-', '')[:8].upper()}"
 
     return {
@@ -98,14 +82,14 @@ def generate_markdown(results):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     md = [
-        "# 🔐 Contrast – Reported Vulnerability Summary",
+        "# 🔐 Contrast Vulnerability Summary (Trace-Based)",
         "",
         f"Generated: {now}",
         "",
         "## How to use with Codex",
         "Paste this Markdown into Codex and ask:",
         "",
-        "`Explain Analysis ID <ID> with exploit scenario, impact, and secure remediation.`",
+        "`Analyze Analysis ID <ID> and explain exploitability, impact, and secure remediation.`",
         "",
         "---"
     ]
@@ -138,11 +122,11 @@ def generate_markdown(results):
 # =====================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Fetch Reported Contrast Traces for Codex Analysis"
+        description="Fetch Contrast Trace Details for Codex Analysis (No Status Filter)"
     )
     parser.add_argument("--traces", help="Comma-separated Trace IDs")
     parser.add_argument("--file", help="File containing Trace IDs")
-    parser.add_argument("--out", default="reported_contrast_traces.md")
+    parser.add_argument("--out", default="contrast_trace_summary.md")
     args = parser.parse_args()
 
     trace_ids = load_trace_ids(args.traces, args.file)
@@ -151,16 +135,7 @@ def main():
     for tid in trace_ids:
         print(f"🔹 Fetching trace {tid}")
         trace = fetch_trace(tid)
-        parsed = parse_trace(trace, tid)
-
-        if parsed:
-            results.append(parsed)
-        else:
-            print(f"⚠ Skipped {tid} (not Reported per API state)")
-
-    if not results:
-        print("❌ No reported traces found")
-        sys.exit(1)
+        results.append(parse_trace(trace, tid))
 
     Path(args.out).write_text(
         generate_markdown(results),
