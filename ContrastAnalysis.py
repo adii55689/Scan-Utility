@@ -1,33 +1,36 @@
 import requests
 import argparse
+import base64
 from datetime import datetime
 from pathlib import Path
 import sys
-import hashlib
 
 # =====================================================
-# CONFIGURATION (UPDATE THESE)
+# CONFIGURATION (MATCH YOUR WORKING CURL)
 # =====================================================
 CONTRAST_BASE_URL = "https://contrast.eclinicalworks.com/Contrast/api/ng"
 ORG_ID = "YOUR_ORG_ID"
 
-# 👇 COPY THIS DIRECTLY FROM CONTRAST (NO CHANGES)
-AUTHORIZATION_HEADER = "Basic <PASTE_BASE64_VALUE_HERE>"
+USERNAME = "your.email@company.com"
+SERVICE_KEY = "YOUR_SERVICE_KEY"
 API_KEY = "YOUR_API_KEY"
 
-TIMEOUT = 30  # VPN-safe timeout
+TIMEOUT = 30  # VPN-safe
 
 # =====================================================
-# SESSION SETUP
+# AUTH + SESSION
 # =====================================================
-HEADERS = {
-    "Authorization": AUTHORIZATION_HEADER,
-    "API-Key": API_KEY,
-    "Accept": "application/json"
-}
+def build_headers():
+    raw = f"{USERNAME}:{SERVICE_KEY}".encode("utf-8")
+    encoded = base64.b64encode(raw).decode("utf-8")
+    return {
+        "Authorization": f"Basic {encoded}",
+        "API-Key": API_KEY,
+        "Accept": "application/json"
+    }
 
 SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+SESSION.headers.update(build_headers())
 
 # =====================================================
 # CONNECTION VALIDATION
@@ -35,7 +38,6 @@ SESSION.headers.update(HEADERS)
 def validate_connection():
     print("🔍 Validating Contrast connectivity...")
     url = f"{CONTRAST_BASE_URL}/{ORG_ID}/applications"
-
     try:
         r = SESSION.get(url, timeout=TIMEOUT)
     except requests.exceptions.RequestException as e:
@@ -46,25 +48,20 @@ def validate_connection():
         print("✅ Connection validated\n")
         return
 
-    if r.status_code == 401:
-        print("❌ 401 Unauthorized – check Authorization or API key")
-    elif r.status_code == 403:
-        print("❌ 403 Forbidden – check permissions")
-    else:
-        print(f"❌ Unexpected response {r.status_code}")
-        print(r.text)
-
+    print(f"❌ Validation failed ({r.status_code})")
+    print(r.text)
     sys.exit(1)
 
 # =====================================================
-# TRACE ID INPUT
+# INPUT HANDLING
 # =====================================================
 def load_trace_ids(traces, file):
     ids = set()
     if traces:
         ids.update(t.strip() for t in traces.split(",") if t.strip())
     if file:
-        ids.update(line.strip() for line in open(file) if line.strip())
+        with open(file) as f:
+            ids.update(line.strip() for line in f if line.strip())
     if not ids:
         raise ValueError("No Trace IDs provided")
     return list(ids)
@@ -80,67 +77,46 @@ def fetch_trace(trace_id):
     return r.json()
 
 # =====================================================
-# SAFE TRACE IDENTIFIER
+# EXTRACT SOURCE & SINK (REAL FIX)
 # =====================================================
-def get_trace_identifier(trace):
-    for key in ("uuid", "traceId", "id", "vulnerabilityUuid"):
-        if key in trace and trace[key]:
-            return str(trace[key])
-    return hashlib.sha256(str(trace).encode()).hexdigest()[:8]
+def extract_source_sink(trace):
+    source = {}
+    sink = {}
 
-# =====================================================
-# LLM ANALYSIS (PLACEHOLDER)
-# =====================================================
-def call_llm(prompt: str) -> str:
-    return f"""
-### Why this is Vulnerable
-Untrusted input reaches a sensitive sink without sufficient validation.
+    for event in trace.get("events", []):
+        if event.get("type") == "SOURCE":
+            source = event
+        elif event.get("type") == "SINK":
+            sink = event
 
-### Exploitability
-An attacker can manipulate input during normal execution paths.
-
-### Secure Fix
-Validate input and use secure framework APIs.
-
-### Risk Summary
-This issue violates trust boundaries and requires remediation.
-"""
+    return source, sink
 
 # =====================================================
-# TRACE ANALYSIS
+# ANALYSIS ID RESOLUTION
 # =====================================================
-def analyze_trace(trace):
-    trace_id = get_trace_identifier(trace)
-    analysis_id = f"ANL-{trace_id[:8].upper()}"
-
-    src = trace.get("sourceLocation", {})
-    snk = trace.get("sinkLocation", {})
-
-    prompt = f"""
-Analysis ID: {analysis_id}
-
-Vulnerability: {trace.get('title')}
-Severity: {trace.get('severity')}
-
-Input:
-File: {src.get('file')}
-Line: {src.get('line')}
-
-Output:
-File: {snk.get('file')}
-Line: {snk.get('line')}
-
-Source → Sink:
-{trace.get('source')} → {trace.get('sink')}
-"""
-
-    explanation = call_llm(prompt)
-    return analysis_id, explanation
+def resolve_trace_identifier(trace, fallback):
+    return (
+        trace.get("traceId")
+        or trace.get("uuid")
+        or trace.get("id")
+        or fallback
+    )
 
 # =====================================================
-# MARKDOWN REPORT
+# LLM PLACEHOLDER (Codex reads MD later)
 # =====================================================
-def generate_report(traces):
+def security_analysis_text():
+    return (
+        "Untrusted input reaches a sensitive sink without sufficient validation, "
+        "allowing an attacker to influence application behavior across trust boundaries. "
+        "This can be exploited during normal execution paths and should be remediated "
+        "using strict input validation and safe framework APIs."
+    )
+
+# =====================================================
+# GENERATE MARKDOWN REPORT
+# =====================================================
+def generate_report(traces_with_ids):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     md = [
@@ -149,31 +125,43 @@ def generate_report(traces):
         f"Generated: {now}",
         "",
         "### How to Use",
-        "Reference **Analysis ID** in Codex for follow-ups.",
+        "Paste this Markdown into Codex and ask questions using **Analysis ID**.",
         "",
         "---"
     ]
 
-    for trace in traces:
-        analysis_id, explanation = analyze_trace(trace)
-        src = trace.get("sourceLocation", {})
-        snk = trace.get("sinkLocation", {})
+    for trace, trace_id in traces_with_ids:
+        trace_identifier = resolve_trace_identifier(trace, trace_id)
+        analysis_id = f"ANL-{trace_identifier.replace('-', '')[:8].upper()}"
+
+        source, sink = extract_source_sink(trace)
+
+        application = (
+            trace.get("applicationName")
+            or trace.get("application", {}).get("name")
+            or "Unknown"
+        )
+
+        severity = trace.get("severity", "Unknown")
+        vuln = trace.get("title", "Unknown")
 
         md.extend([
             f"## 🆔 Analysis ID: {analysis_id}",
-            f"**Application:** {trace.get('application', {}).get('name')}",
-            f"**Severity:** {trace.get('severity')}",
+            f"**Trace ID:** {trace_identifier}",
+            f"**Application:** {application}",
+            f"**Severity:** {severity}",
+            f"**Vulnerability:** {vuln}",
             "",
             "### 📥 Input (Source)",
-            f"- File: `{src.get('file')}`",
-            f"- Line: `{src.get('line')}`",
+            f"- File: `{source.get('file', 'N/A')}`",
+            f"- Line: `{source.get('line', 'N/A')}`",
             "",
             "### 📤 Output (Sink)",
-            f"- File: `{snk.get('file')}`",
-            f"- Line: `{snk.get('line')}`",
+            f"- File: `{sink.get('file', 'N/A')}`",
+            f"- Line: `{sink.get('line', 'N/A')}`",
             "",
             "### 🧠 Security Analysis",
-            explanation,
+            security_analysis_text(),
             "",
             "### 🧵 Stack Trace",
             "```",
@@ -189,7 +177,7 @@ def generate_report(traces):
 # MAIN
 # =====================================================
 def main():
-    parser = argparse.ArgumentParser(description="Contrast Trace Analysis (Direct Auth)")
+    parser = argparse.ArgumentParser(description="Final Contrast Analysis Generator")
     parser.add_argument("--traces", help="Comma-separated Trace IDs")
     parser.add_argument("--file", help="File containing Trace IDs")
     parser.add_argument("--out", default="contrast_analysis_report.md")
@@ -199,15 +187,16 @@ def main():
 
     trace_ids = load_trace_ids(args.traces, args.file)
 
-    traces = []
+    traces_with_ids = []
     for tid in trace_ids:
         print(f"🔹 Fetching trace {tid}")
-        traces.append(fetch_trace(tid))
+        trace = fetch_trace(tid)
+        traces_with_ids.append((trace, tid))
 
-    report = generate_report(traces)
+    report = generate_report(traces_with_ids)
     Path(args.out).write_text(report, encoding="utf-8")
 
-    print(f"\n✅ Analysis completed: {args.out}")
+    print(f"\n✅ Report generated: {args.out}")
 
 if __name__ == "__main__":
     main()
