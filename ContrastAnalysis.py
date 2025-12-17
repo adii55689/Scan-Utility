@@ -10,14 +10,14 @@ import sys
 CONTRAST_BASE_URL = "https://contrast.eclinicalworks.com/Contrast/api/ng"
 ORG_ID = "YOUR_ORG_ID"
 
-# 👇 YOU ALREADY HAVE BASE64 – PASTE IT AS-IS
-AUTHORIZATION_HEADER = "Basic YOUR_BASE64_VALUE_HERE"
+# Use existing Base64 auth value
+AUTHORIZATION_HEADER = "Basic YOUR_BASE64_VALUE"
 API_KEY = "YOUR_API_KEY"
 
-TIMEOUT = 30  # VPN / enterprise safe
+TIMEOUT = 30
 
 # =====================================================
-# SESSION SETUP
+# SESSION
 # =====================================================
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -27,28 +27,7 @@ SESSION.headers.update({
 })
 
 # =====================================================
-# CONNECTION VALIDATION
-# =====================================================
-def validate_connection():
-    print("🔍 Validating Contrast connectivity...")
-    url = f"{CONTRAST_BASE_URL}/{ORG_ID}/applications"
-
-    try:
-        r = SESSION.get(url, timeout=TIMEOUT)
-    except requests.exceptions.RequestException as e:
-        print("❌ Network error:", e)
-        sys.exit(1)
-
-    if r.status_code == 200:
-        print("✅ Connection validated\n")
-        return
-
-    print(f"❌ Connection failed ({r.status_code})")
-    print(r.text)
-    sys.exit(1)
-
-# =====================================================
-# INPUT HANDLING
+# INPUT
 # =====================================================
 def load_trace_ids(traces, file):
     ids = set()
@@ -66,12 +45,12 @@ def load_trace_ids(traces, file):
     return list(ids)
 
 # =====================================================
-# FETCH TRACE (UI-BACKED ENDPOINT)
+# FETCH TRACE SUMMARY (UI FILTER ENDPOINT)
 # =====================================================
-def fetch_trace(trace_id):
+def fetch_trace_summary(trace_id):
     url = (
         f"{CONTRAST_BASE_URL}/{ORG_ID}/orgtraces/filter/{trace_id}"
-        "?expand=events,request,application,violations"
+        "?expand=server_environments,violations"
     )
 
     r = SESSION.get(url, timeout=TIMEOUT)
@@ -79,68 +58,43 @@ def fetch_trace(trace_id):
     return r.json()
 
 # =====================================================
-# EXTRACT SOURCE & SINK
+# PARSE & VALIDATE STATUS
 # =====================================================
-def extract_source_sink(trace):
-    source = {}
-    sink = {}
+def parse_reported_trace(trace, fallback_id):
+    if trace.get("status") != "Reported":
+        return None  # Skip non-reported
 
-    for event in trace.get("events", []):
-        if event.get("type") == "SOURCE":
-            source = event
-        elif event.get("type") == "SINK":
-            sink = event
-
-    return source, sink
-
-# =====================================================
-# ANALYZE TRACE
-# =====================================================
-def analyze_trace(trace, fallback_trace_id):
-    analysis_id = f"ANL-{fallback_trace_id.replace('-', '')[:8].upper()}"
-
-    application = trace.get("application", {}).get("name", "Unknown")
-
-    violations = trace.get("violations", [])
-    vulnerability = violations[0].get("rule", "Unknown") if violations else "Unknown"
-    severity = violations[0].get("severity", "Unknown") if violations else "Unknown"
-
-    source, sink = extract_source_sink(trace)
-
-    request = trace.get("request", {})
-    request_url = request.get("url")
-    request_method = request.get("method")
-    request_params = request.get("parameters", [])
+    analysis_id = f"ANL-{fallback_id.replace('-', '')[:8].upper()}"
 
     return {
         "analysis_id": analysis_id,
-        "trace_id": fallback_trace_id,
-        "application": application,
-        "severity": severity,
-        "vulnerability": vulnerability,
-        "source": source,
-        "sink": sink,
-        "request_url": request_url,
-        "request_method": request_method,
-        "request_params": request_params,
-        "stack": trace.get("stackTrace", "N/A")
+        "trace_id": trace.get("uuid", fallback_id),
+        "rule_name": trace.get("rule_name"),
+        "rule_title": trace.get("rule_title"),
+        "title": trace.get("title"),
+        "sub_title": trace.get("sub_title"),
+        "severity": trace.get("severity"),
+        "severity_label": trace.get("severity_label"),
+        "status": trace.get("status"),
+        "environments": ", ".join(trace.get("server_environments", [])),
+        "total_traces": trace.get("total_traces_received"),
+        "total_notes": trace.get("total_notes"),
     }
 
 # =====================================================
-# MARKDOWN REPORT
+# MARKDOWN (CODEX-READY)
 # =====================================================
-def generate_report(results):
+def generate_markdown(results):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     md = [
-        "# 🔐 Automated Contrast Analysis Report",
+        "# 🔐 Contrast Reported Vulnerability Summary",
         "",
         f"Generated: {now}",
         "",
-        "## How to Use",
-        "Paste this Markdown into Codex and ask questions using **Analysis ID**.",
-        "Example:",
-        "`Explain Analysis ID ANL-XXXXXXX with exploit scenario and secure fix.`",
+        "## How to use with Codex",
+        "Paste this Markdown into Codex and ask:",
+        "`Analyze Analysis ID <ID> and explain exploitability, impact, and secure remediation.`",
         "",
         "---"
     ]
@@ -149,32 +103,19 @@ def generate_report(results):
         md.extend([
             f"## 🆔 Analysis ID: {r['analysis_id']}",
             f"**Trace ID:** {r['trace_id']}",
-            f"**Application:** {r['application']}",
-            f"**Severity:** {r['severity']}",
-            f"**Vulnerability:** {r['vulnerability']}",
+            f"**Rule:** {r['rule_title']} ({r['rule_name']})",
+            f"**Severity:** {r['severity_label']}",
+            f"**Status:** {r['status']}",
+            f"**Environments:** {r['environments']}",
             "",
-            "### 🌐 Request Context",
-            f"- Method: `{r['request_method']}`",
-            f"- URL: `{r['request_url']}`",
-            f"- Parameters: `{', '.join(r['request_params']) if r['request_params'] else 'N/A'}`",
+            "### 📌 Vulnerability Context",
+            r["title"],
             "",
-            "### 📥 Input (Source)",
-            f"- File: `{r['source'].get('file', 'N/A')}`",
-            f"- Line: `{r['source'].get('line', 'N/A')}`",
+            r["sub_title"],
             "",
-            "### 📤 Output (Sink)",
-            f"- File: `{r['sink'].get('file', 'N/A')}`",
-            f"- Line: `{r['sink'].get('line', 'N/A')}`",
-            "",
-            "### 🧠 Security Analysis",
-            "Untrusted input flows from the identified source to a sensitive sink.",
-            "This allows attacker-controlled data to influence application behavior",
-            "during normal execution paths, making the issue exploitable.",
-            "",
-            "### 🧵 Stack Trace",
-            "```",
-            r["stack"],
-            "```",
+            "### 📊 Metadata",
+            f"- Total traces observed: `{r['total_traces']}`",
+            f"- Notes added: `{r['total_notes']}`",
             "",
             "---"
         ])
@@ -186,27 +127,34 @@ def generate_report(results):
 # =====================================================
 def main():
     parser = argparse.ArgumentParser(
-        description="Contrast → Codex Automated Analysis (Final)"
+        description="Fetch Reported Contrast Traces for Codex Analysis"
     )
     parser.add_argument("--traces", help="Comma-separated Trace IDs")
-    parser.add_argument("--file", help="File with Trace IDs (one per line)")
-    parser.add_argument("--out", default="contrast_analysis_report.md")
+    parser.add_argument("--file", help="File with Trace IDs")
+    parser.add_argument("--out", default="reported_contrast_traces.md")
     args = parser.parse_args()
-
-    validate_connection()
 
     trace_ids = load_trace_ids(args.traces, args.file)
 
     results = []
     for tid in trace_ids:
         print(f"🔹 Fetching trace {tid}")
-        trace = fetch_trace(tid)
-        results.append(analyze_trace(trace, tid))
+        trace = fetch_trace_summary(tid)
+        parsed = parse_reported_trace(trace, tid)
 
-    report = generate_report(results)
+        if parsed:
+            results.append(parsed)
+        else:
+            print(f"⚠ Skipped {tid} (status not Reported)")
+
+    if not results:
+        print("❌ No reported traces found")
+        sys.exit(1)
+
+    report = generate_markdown(results)
     Path(args.out).write_text(report, encoding="utf-8")
 
-    print(f"\n✅ Report generated: {args.out}")
+    print(f"\n✅ Markdown generated: {args.out}")
 
 if __name__ == "__main__":
     main()
